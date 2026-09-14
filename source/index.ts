@@ -74,12 +74,14 @@ export {HTTPError} from './errors/HTTPError.js';
 export {SchemaValidationError} from './errors/SchemaValidationError.js';
 export {NetworkError} from './errors/NetworkError.js';
 export {TimeoutError} from './errors/TimeoutError.js';
+export {ResponseSizeError} from './errors/ResponseSizeError.js';
 export {ForceRetryError} from './errors/ForceRetryError.js';
 export {
 	isKyError,
 	isHTTPError,
 	isNetworkError,
 	isTimeoutError,
+	isResponseSizeError,
 	isForceRetryError,
 } from './utils/type-guards.js';
 export {replaceOption} from './utils/merge.js';

@@ -428,6 +428,25 @@ const json = await ky('https://example.com', {
 }).json();
 ```
 
+##### maxResponseSize
+
+Type: `number`\
+Default: `Infinity`
+
+Maximum response body size in bytes. Must be a non-negative safe integer or `Infinity`. Set to `0` to allow only empty bodies.
+
+The limit counts bytes from the response stream after decompression, independently of `Content-Length`. It applies as the body is consumed, including in `afterResponse` hooks and for responses returned by hooks. Exceeding the limit cancels the stream and throws a `ResponseSizeError`, without automatically retrying.
+
+With `await ky(url)`, the response can resolve before the limit is exceeded; the body read will reject instead. This limits body bytes, not total memory usage. Parsing, buffering, and concurrent requests can use additional memory.
+
+```js
+import ky from 'ky';
+
+const data = await ky('https://example.com/data', {
+	maxResponseSize: 20 * 1024 * 1024,
+}).json();
+```
+
 ##### hooks
 
 Type: `object<string, Function[]>`\
@@ -599,7 +618,9 @@ Default: `[]`
 
 This hook enables you to modify any error right before it is thrown. The hook function receives a state object with the current request, the normalized Ky options, the error, and retry count, and should return an `Error` instance.
 
-This hook is called for all error types, including `HTTPError`, `NetworkError`, `TimeoutError`, and `ForceRetryError` (when retry limit is exceeded via `ky.retry()`). Use type guards like `isHTTPError()`, `isNetworkError()`, or `isTimeoutError()` to handle specific error types.
+This hook receives errors Ky handles during its request lifecycle, including `HTTPError`, `NetworkError`, `TimeoutError`, `ResponseSizeError`, and `ForceRetryError` (when retry limit is exceeded via `ky.retry()`). Use type guards like `isHTTPError()`, `isNetworkError()`, `isTimeoutError()`, or `isResponseSizeError()` to handle specific error types.
+
+Errors raised while consuming an already returned `Response` are outside the request lifecycle. Use a body method shortcut like `await ky(url).json()` to process body-read `ResponseSizeError`, `NetworkError`, and `TimeoutError` instances through this hook.
 
 The `retryCount` is `0` for the initial request and increments with each retry. This allows you to distinguish between the initial request and retries, which is useful when you need different error handling based on retry attempts (e.g., showing different error messages on the final attempt).
 
@@ -1206,7 +1227,7 @@ const response = await api.get('https://example.com/api');
 
 ### KyError
 
-Base class for all Ky-specific errors. `HTTPError`, `NetworkError`, `TimeoutError`, and `ForceRetryError` extend this class.
+Base class for all Ky-specific errors. `HTTPError`, `NetworkError`, `TimeoutError`, `ResponseSizeError`, and `ForceRetryError` extend this class.
 
 You can use `instanceof KyError` to check if an error originated from Ky, or use the `isKyError()` type guard for cross-realm compatibility and TypeScript type narrowing.
 
@@ -1229,7 +1250,7 @@ try {
 
 Exposed for `instanceof` checks. The error has a `response` property with the [`Response` object](https://developer.mozilla.org/en-US/docs/Web/API/Response), `request` property with the [`Request` object](https://developer.mozilla.org/en-US/docs/Web/API/Request), and `options` property with normalized options (either passed to `ky` when creating an instance with `ky.create()` or directly when performing the request).
 
-It also has a `data` property with the pre-parsed response body. For JSON responses (based on `Content-Type`), the body is parsed using the [`parseJson` option](#parsejson) if set, or `JSON.parse` by default. For other content types, it is set as plain text. If the body is empty, unreadable, too large, parsing fails, or the error-data read/parse timeout is reached, `data` will be `undefined`. To avoid hanging or excessive buffering, `error.data` body reads and async JSON parsing are bounded by the request timeout (or 10 seconds when `timeout` is disabled), any remaining `totalTimeout` budget, and a 10 MiB response body size limit. If `totalTimeout` expires while populating `error.data`, Ky throws `TimeoutError` instead of `HTTPError`. The `data` property is populated before [`beforeError`](#hooks) hooks run, so hooks can access it.
+It also has a `data` property with the pre-parsed response body. For JSON responses (based on `Content-Type`), the body is parsed using the [`parseJson` option](#parsejson) if set, or `JSON.parse` by default. For other content types, it is set as plain text. If the body is empty, unreadable, too large, parsing fails, or the error-data read/parse timeout is reached, `data` will be `undefined`. To avoid hanging or excessive buffering, `error.data` body reads and async JSON parsing are bounded by the request timeout (or 10 seconds when `timeout` is disabled), any remaining `totalTimeout` budget, and a 10 MiB response body size limit. If `maxResponseSize` is exceeded while populating `error.data`, Ky throws `ResponseSizeError` instead of `HTTPError`. If `totalTimeout` expires while populating `error.data`, Ky throws `TimeoutError` instead of `HTTPError`. The `data` property is populated before [`beforeError`](#hooks) hooks run, so hooks can access it.
 
 Be aware that some types of errors, such as network errors, inherently mean that a response was not received. In that case, the error will be an instance of [`NetworkError`](#networkerror) instead of `HTTPError` and will not contain a `response` property.
 
@@ -1304,6 +1325,22 @@ try {
 } catch (error) {
 	if (isTimeoutError(error)) {
 		console.log('Request timed out');
+	}
+}
+```
+
+### ResponseSizeError
+
+Error thrown when the response body exceeds `maxResponseSize`. It has a `request` property with the `Request` object and a `maxResponseSize` property with the configured limit in bytes.
+
+```js
+import ky, {isResponseSizeError} from 'ky';
+
+try {
+	await ky('https://example.com/data', {maxResponseSize: 1024}).json();
+} catch (error) {
+	if (isResponseSizeError(error)) {
+		console.log(`Response exceeded ${error.maxResponseSize} bytes`);
 	}
 }
 ```

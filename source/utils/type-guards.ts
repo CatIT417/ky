@@ -1,6 +1,7 @@
 import type {KyError} from '../errors/KyError.js';
 import {HTTPError} from '../errors/HTTPError.js';
 import {NetworkError} from '../errors/NetworkError.js';
+import {ResponseSizeError} from '../errors/ResponseSizeError.js';
 import {TimeoutError} from '../errors/TimeoutError.js';
 import {ForceRetryError} from '../errors/ForceRetryError.js';
 
@@ -33,7 +34,7 @@ try {
 ```
 */
 export function isKyError(error: unknown): error is KyError {
-	return (error as any)?.isKyError === true || isHTTPError(error) || isNetworkError(error) || isTimeoutError(error) || isForceRetryError(error);
+	return (error as any)?.isKyError === true || isHTTPError(error) || isNetworkError(error) || isTimeoutError(error) || isForceRetryError(error) || isResponseSizeError(error);
 }
 
 /**
@@ -127,4 +128,27 @@ const api = ky.extend({
 */
 export function isForceRetryError(error: unknown): error is ForceRetryError {
 	return isErrorType(error, ForceRetryError);
+}
+
+/**
+Type guard to check if an error is a `ResponseSizeError`.
+
+@param error - The error to check
+@returns `true` if the error is a `ResponseSizeError`, `false` otherwise
+
+@example
+```
+import ky, {isResponseSizeError} from 'ky';
+
+try {
+	await ky('https://example.com/data', {maxResponseSize: 1024}).json();
+} catch (error) {
+	if (isResponseSizeError(error)) {
+		console.log(`Response exceeded ${error.maxResponseSize} bytes`);
+	}
+}
+```
+*/
+export function isResponseSizeError(error: unknown): error is ResponseSizeError {
+	return isErrorType(error, ResponseSizeError);
 }

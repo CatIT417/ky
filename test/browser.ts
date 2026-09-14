@@ -51,6 +51,94 @@ test.afterEach(async () => {
 	await server.close();
 });
 
+defaultBrowsersTest('maxResponseSize limits response bytes', async (t, page) => {
+	server.get('/', (_request, response) => {
+		response.end('🦄');
+	});
+
+	await page.goto(server.url);
+	await addKyScriptToPage(page);
+
+	const result = await page.evaluate(async (url: string) => {
+		const text = await globalThis.ky(url, {maxResponseSize: 4}).text();
+		let errorName: string | undefined;
+		let hookErrorName: string | undefined;
+		try {
+			await globalThis.ky(url, {
+				maxResponseSize: 3,
+				hooks: {
+					afterResponse: [async ({response}) => {
+						await response.text();
+					}],
+					beforeError: [({error}) => {
+						hookErrorName = error.name;
+						return error;
+					}],
+				},
+			});
+		} catch (error) {
+			errorName = (error as Error).name;
+		}
+
+		return {text, errorName, hookErrorName};
+	}, server.url);
+
+	t.deepEqual(result, {text: '🦄', errorName: 'ResponseSizeError', hookErrorName: 'ResponseSizeError'});
+});
+
+defaultBrowsersTest('maxResponseSize preserves errors in native body methods and progress wrappers', async (t, page) => {
+	server.get('/', (_request, response) => {
+		response.end('ok');
+	});
+	server.get('/data', (_request, response) => {
+		response.set('content-type', 'application/x-www-form-urlencoded').end('a=1');
+	});
+
+	await page.goto(server.url);
+	await addKyScriptToPage(page);
+
+	const errors = await page.evaluate(async (url: string) => {
+		const errors: Array<string | undefined> = [];
+		for (const method of ['text', 'json', 'arrayBuffer', 'blob', 'formData', 'bytes'] as const) {
+			if (typeof Response.prototype[method] !== 'function') {
+				continue;
+			}
+
+			// eslint-disable-next-line no-await-in-loop
+			const response = await globalThis.ky(`${url}/data`, {
+				maxResponseSize: 1,
+				hooks: {
+					afterResponse: [({response}) => {
+						// Exercise both branches of a native clone before wrapping the shared body.
+						void response.clone().body?.cancel();
+						return new Response(response.body, response);
+					}],
+				},
+				onDownloadProgress() {
+					return undefined;
+				},
+			});
+
+			for (const body of [response.clone(), response]) {
+				let errorName: string | undefined;
+				try {
+					// eslint-disable-next-line no-await-in-loop
+					await body[method]();
+				} catch (error) {
+					errorName = (error as Error).name;
+				}
+
+				errors.push(errorName);
+			}
+		}
+
+		return errors;
+	}, server.url);
+
+	t.true(errors.length >= 10);
+	t.true(errors.every(name => name === 'ResponseSizeError'));
+});
+
 defaultBrowsersTest('baseUrl option', async (t: ExecutionContext, page: Page) => {
 	server.get('/', (_request, response) => {
 		response.end('zebra');

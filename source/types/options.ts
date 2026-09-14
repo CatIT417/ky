@@ -242,6 +242,26 @@ export type KyOptions = {
 	totalTimeout?: number | false | undefined;
 
 	/**
+	Maximum response body size in bytes. Must be a non-negative safe integer or `Infinity`. Set to `0` to allow only empty bodies.
+
+	The limit counts bytes from the response stream after decompression, independently of `Content-Length`. It applies as the body is consumed, including in `afterResponse` hooks and for responses returned by hooks. Exceeding the limit cancels the stream and throws a `ResponseSizeError`, without automatically retrying.
+
+	With `await ky(url)`, the response can resolve before the limit is exceeded; the body read will reject instead. This limits body bytes, not total memory usage. Parsing, buffering, and concurrent requests can use additional memory.
+
+	@default Infinity
+
+	@example
+	```
+	import ky from 'ky';
+
+	const data = await ky('https://example.com/data', {
+		maxResponseSize: 20 * 1024 * 1024,
+	}).json();
+	```
+	*/
+	maxResponseSize?: number | undefined;
+
+	/**
 	Hooks allow modifications during the request lifecycle. Hook functions may be async and are run serially, unless otherwise noted.
 	*/
 	hooks?: Hooks | undefined;
@@ -484,6 +504,7 @@ export type InternalOptions = Omit<Options, 'hooks' | 'retry' | 'context' | 'thr
 	prefix: string;
 	timeout: number | false;
 	totalTimeout: number | false;
+	maxResponseSize: number;
 	context: Record<string, unknown>;
 	throwHttpErrors: boolean | ((status: number) => boolean);
 };

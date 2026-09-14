@@ -1,7 +1,9 @@
 import type {Options} from '../types/options.js';
-import {usualFormBoundarySize} from '../core/constants.js';
+import {responseTypes, usualFormBoundarySize} from '../core/constants.js';
+import {ResponseSizeError} from '../errors/ResponseSizeError.js';
 
 const encoder = new TextEncoder();
+const responseSizeErrors = new WeakMap<ReadableStream, () => ResponseSizeError | undefined>();
 
 // eslint-disable-next-line @typescript-eslint/no-restricted-types
 export const getBodySize = (body?: BodyInit | null): number => {
@@ -75,8 +77,32 @@ const withProgress = (stream: ReadableStream<Uint8Array>, totalBytes: number, on
 	}));
 };
 
-const copyResponseMetadata = (response: Response, originalResponse: Response): Response => {
+const copyResponseMetadata = (response: Response, originalResponse: Response, getError = originalResponse.body ? responseSizeErrors.get(originalResponse.body) : undefined): Response => {
 	const nativeClone = response.clone.bind(response);
+	if (response.body && getError) {
+		responseSizeErrors.set(response.body, getError);
+
+		// Chromium replaces stream errors with a generic TypeError in native body methods.
+		// Restore the size error, including on clones and download-progress wrappers.
+		for (const type of Object.keys(responseTypes) as Array<keyof typeof responseTypes>) {
+			if (typeof response[type] !== 'function') {
+				continue;
+			}
+
+			const nativeMethod = response[type].bind(response);
+			Object.defineProperty(response, type, {
+				async value() {
+					try {
+						return await nativeMethod();
+					} catch (error) {
+						throw getError() ?? error;
+					}
+				},
+				writable: true,
+				configurable: true,
+			});
+		}
+	}
 
 	Object.defineProperties(response, {
 		// The `Response` constructor cannot set these, so copy them over from the original response.
@@ -86,7 +112,15 @@ const copyResponseMetadata = (response: Response, originalResponse: Response): R
 		// Native `clone()` creates a new `Response`, which would drop them again.
 		// Keep the shim replaceable like `Response.prototype.clone` for instrumentation and mocks.
 		clone: {
-			value: () => copyResponseMetadata(nativeClone(), response),
+			value() {
+				const clone = nativeClone();
+				// Cloning replaces the original body too, so retain the error accessor on both branches.
+				if (response.body && getError) {
+					responseSizeErrors.set(response.body, getError);
+				}
+
+				return copyResponseMetadata(clone, response);
+			},
 			writable: true,
 			configurable: true,
 		},
@@ -95,21 +129,38 @@ const copyResponseMetadata = (response: Response, originalResponse: Response): R
 	return response;
 };
 
+export const limitResponseSize = (response: Response, request: Request, maxResponseSize: number): Response => {
+	if (!response.body || maxResponseSize === Number.POSITIVE_INFINITY) {
+		return response;
+	}
+
+	let transferredBytes = 0;
+	let sizeError: ResponseSizeError | undefined;
+	const getOriginalSizeError = responseSizeErrors.get(response.body);
+	const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+		transform(chunk, controller) {
+			transferredBytes += chunk.byteLength;
+			if (transferredBytes > maxResponseSize) {
+				sizeError = new ResponseSizeError(request, maxResponseSize);
+				throw sizeError;
+			}
+
+			controller.enqueue(chunk);
+		},
+	}));
+
+	return copyResponseMetadata(new Response(body, response), response, () => sizeError ?? getOriginalSizeError?.());
+};
+
 export const streamResponse = (response: Response, onDownloadProgress: Options['onDownloadProgress']) => {
 	if (!response.body) {
 		return response;
 	}
 
-	const responseInit = {
-		status: response.status,
-		statusText: response.statusText,
-		headers: response.headers,
-	};
-
 	const totalBytes = Math.max(0, Number(response.headers.get('content-length')) || 0);
 	const body = response.status === 204 ? null : withProgress(response.body, totalBytes, onDownloadProgress);
 
-	return copyResponseMetadata(new Response(body, responseInit), response);
+	return copyResponseMetadata(new Response(body, response), response);
 };
 
 // eslint-disable-next-line @typescript-eslint/no-restricted-types

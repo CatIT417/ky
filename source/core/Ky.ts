@@ -15,7 +15,7 @@ import type {
 } from '../types/options.js';
 import {type ResponsePromise} from '../types/ResponsePromise.js';
 import type {StandardSchemaV1} from '../types/standard-schema.js';
-import {streamRequest, streamResponse} from '../utils/body.js';
+import {limitResponseSize, streamRequest, streamResponse} from '../utils/body.js';
 import {
 	cloneShallow,
 	cloneDeep,
@@ -30,7 +30,9 @@ import delay from '../utils/delay.js';
 import {type ObjectEntries} from '../utils/types.js';
 import {findUnknownOptions, hasSearchParameters} from '../utils/options.js';
 import isRawNetworkError from '../utils/is-network-error.js';
-import {isHTTPError, isNetworkError, isTimeoutError} from '../utils/type-guards.js';
+import {
+	isHTTPError, isNetworkError, isTimeoutError, isResponseSizeError,
+} from '../utils/type-guards.js';
 import {
 	calculateRetryTimingDelay,
 	getRetryTimingHeader,
@@ -283,9 +285,8 @@ export class Ky {
 					throw new Error('Streams are not supported in your environment. `ReadableStream` is missing.');
 				}
 
-				const progressResponse = streamResponse(response.clone(), ky.#options.onDownloadProgress);
+				const progressResponse = streamResponse(response, ky.#options.onDownloadProgress);
 				ky.#setResponseRequest(progressResponse, ky.#getResponseRequest(response));
-				ky.#cancelResponseBody(response);
 				return ky.#decorateResponse(progressResponse);
 			}
 
@@ -384,6 +385,7 @@ export class Ky {
 
 	// eslint-disable-next-line complexity
 	constructor(input: Input, options: Options = {}) {
+		const {maxResponseSize = Number.POSITIVE_INFINITY} = options;
 		if (Object.hasOwn(options, 'prefixUrl')) {
 			throw new Error(prefixUrlRenamedErrorMessage);
 		}
@@ -401,10 +403,15 @@ export class Ky {
 			throwHttpErrors: options.throwHttpErrors ?? true,
 			timeout: options.timeout ?? 10_000,
 			totalTimeout: options.totalTimeout ?? false,
+			maxResponseSize,
 			fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
 			context: options.context ?? {},
 		};
 		this.#retryLimit = this.#options.retry.limit;
+
+		if (maxResponseSize !== Number.POSITIVE_INFINITY && (!Number.isSafeInteger(maxResponseSize) || maxResponseSize < 0)) {
+			throw new TypeError('The `maxResponseSize` option must be a non-negative safe integer or Infinity');
+		}
 
 		if (typeof input !== 'string' && !(input instanceof URL || input instanceof globalThis.Request)) {
 			throw new TypeError('`input` must be a string, URL, or Request');
@@ -908,7 +915,11 @@ export class Ky {
 
 					chunks.push(decoder.decode(value, {stream: true}));
 				}
-			} catch {
+			} catch (error) {
+				if (isResponseSizeError(error)) {
+					throw error;
+				}
+
 				return undefined;
 			}
 
@@ -922,7 +933,7 @@ export class Ky {
 			}, timeoutMs);
 			void readAll.finally(() => {
 				clearTimeout(timeoutId);
-			});
+			}).catch(() => undefined);
 		});
 
 		const result = await Promise.race([readAll, timeoutPromise]);
@@ -1014,6 +1025,7 @@ export class Ky {
 
 	async #runAfterResponseHooks(response: Response): Promise<Response> {
 		const responseRequest = this.#getResponseRequest(response);
+		response = this.#limitResponseSize(response);
 
 		for (const hook of this.#options.hooks.afterResponse) {
 			const hookResponse = this.#setResponseRequest(response.clone(), responseRequest);
@@ -1068,7 +1080,9 @@ export class Ky {
 				this.#cancelResponseBody(response);
 			}
 
-			response = nextResponse;
+			if (nextResponse !== response) {
+				response = this.#limitResponseSize(nextResponse);
+			}
 		}
 
 		return response;
@@ -1254,6 +1268,7 @@ export class Ky {
 				searchParams,
 				timeout,
 				totalTimeout,
+				maxResponseSize,
 				throwHttpErrors,
 				fetch,
 				...normalizedOptions
@@ -1290,6 +1305,11 @@ export class Ky {
 	#setResponseRequest(response: Response, request: Request): Response {
 		this.#responseRequests.set(response, request);
 		return response;
+	}
+
+	#limitResponseSize(response: Response): Response {
+		const request = this.#getResponseRequest(response);
+		return this.#setResponseRequest(limitResponseSize(response, request, this.#options.maxResponseSize), request);
 	}
 
 	#wrapRequestWithUploadProgress(request: Request, originalBody?: BodyInit): Request {

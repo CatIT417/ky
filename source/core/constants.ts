@@ -249,6 +249,7 @@ export const kyOptionKeys: KyOptionsRegistry = {
 	retry: true,
 	timeout: true,
 	totalTimeout: true,
+	maxResponseSize: true,
 	hooks: true,
 	throwHttpErrors: true,
 	onDownloadProgress: true,

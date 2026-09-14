@@ -723,7 +723,7 @@ test('onDownloadProgress preserves the final url and redirected state without re
 	t.false(response.redirected);
 });
 
-test('onDownloadProgress cancels original response body', async t => {
+test('onDownloadProgress consumes original response body', async t => {
 	let originalResponse: Response | undefined;
 	let didReportProgress = false;
 
@@ -759,6 +759,32 @@ test('onDownloadProgress cancels original response body', async t => {
 	t.is(responseText, 'ok');
 	t.true(originalResponse?.bodyUsed);
 	t.true(didReportProgress);
+});
+
+test('canceling a download with progress cancels its source without reporting completion', async t => {
+	t.timeout(2000);
+	const cancellation = Promise.withResolvers<void>();
+	let reportedCompletion = false;
+	const response = await ky('https://example.com', {
+		maxResponseSize: 4,
+		fetch: async () => new Response(new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array([1, 2]));
+			},
+			cancel() {
+				cancellation.resolve();
+			},
+		})),
+		onDownloadProgress({percent}) {
+			reportedCompletion ||= percent === 1;
+		},
+	});
+	const reader = response.body!.getReader();
+	const chunk = await reader.read();
+	t.deepEqual(chunk, {done: false, value: new Uint8Array([1, 2])});
+	await reader.cancel();
+	await cancellation.promise;
+	t.false(reportedCompletion);
 });
 
 test('forced retry custom request keeps upload progress', async t => {
